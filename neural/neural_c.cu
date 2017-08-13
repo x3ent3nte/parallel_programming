@@ -132,8 +132,8 @@ void trainNetwork(Neuron* neurons,
 	int input_size = layer_sizes[0];
 	int output_size = layer_sizes[num_layers - 1];
 
-	for (int trial_num = 0; trial_num < num_rows * 3500; trial_num++) {
-		int data_row = trial_num % num_layers;
+	for (int trial_num = 0; trial_num < num_rows * 10; trial_num++) {
+		int data_row = trial_num % num_rows;
 		//INPUT DATA
 		if (local_id < input_size) {
 			neurons[local_id].sig = data[(input_size * data_row) + local_id];
@@ -164,7 +164,7 @@ void trainNetwork(Neuron* neurons,
 			weight_offset += ((layer_sizes[i - 1] + 1) * layer_sizes[i]);
 			__syncthreads();
 		}
-
+		
 		//COMPUTE OUTPUT DELTAS
 		if (local_id < output_size) {
 			Neuron neuron = neurons[prev_neuron_offset + local_id];
@@ -177,7 +177,7 @@ void trainNetwork(Neuron* neurons,
 		//COMPUTE HIDDEN DELTAS
 		int next_neuron_offset = prev_neuron_offset;
 		current_neuron_offset = prev_neuron_offset - layer_sizes[num_layers - 2];
-		int next_weight_offset = weight_offset - (layer_sizes[(num_layers - 2 + 1) * layer_sizes[num_layers - 1]]);
+		int next_weight_offset = weight_offset - ((layer_sizes[(num_layers - 2)] + 1) * layer_sizes[num_layers - 1]);
 		for (int i = num_layers - 2; i >= 1; i--) {
 			if (local_id < layer_sizes[i]) {
 				float sum_delta_x_weights = 0.0f;
@@ -193,7 +193,7 @@ void trainNetwork(Neuron* neurons,
 			next_weight_offset -= (layer_sizes[i - 1] + 1) * layer_sizes[i];
 			__syncthreads();
 		}
-
+		
 		//ADJUST WEIGHTS
 		weight_offset = 0;
 		prev_neuron_offset = 0;
@@ -206,7 +206,7 @@ void trainNetwork(Neuron* neurons,
 				for (int j = 0; j < layer_sizes[i - 1]; j++) {
 					weights[weight_start + j] += learning_rate * neuron.delta * neurons[prev_neuron_offset + j].sig;
 				}
-				weights[weight_start + layer_sizes[i - 1]] = learning_rate * neuron.delta * 1.0f;
+				weights[weight_start + layer_sizes[i - 1]] += learning_rate * neuron.delta;
 			}
 			prev_neuron_offset = current_neuron_offset;
 			current_neuron_offset += layer_sizes[i];
@@ -220,10 +220,10 @@ int main() {
 	srand((int) time(NULL));
 	int seed = rand();
 
-	int training_size = 100;
-	int input_size = 2;
-	int hidden_size = 4;
-	int num_hidden_layers = 2;
+	int training_size = 300;
+	int input_size = 3;
+	int hidden_size = 5;
+	int num_hidden_layers = 3;
 	int output_size = 1;
 	int num_layers = 2 + num_hidden_layers;
 	int total_size = input_size + (num_hidden_layers * hidden_size) + output_size;
@@ -240,15 +240,21 @@ int main() {
 	cudaMemcpy(d_layer_sizes, h_layer_sizes, sizeof(int) * num_layers, cudaMemcpyHostToDevice);
 
 	Neuron* d_neurons;
-	cudaMalloc(&d_neurons, sizeof(Neuron) * (total_size));
+	cudaMalloc(&d_neurons, sizeof(Neuron) * total_size);
 
 	int num_weights = 0;
 	for (int i = 1; i < num_layers; i++) {
 		num_weights += (h_layer_sizes[i - 1] + 1) * h_layer_sizes[i];
 	}
 
+	float* h_weights = (float*) malloc(sizeof(float) * num_weights);
+	for (int i = 0; i < num_weights; i++) {
+		h_weights[i] = randomFloat();
+	}
+
 	float* d_weights;
 	cudaMalloc(&d_weights, sizeof(float) * num_weights);
+	cudaMemcpy(d_weights, h_weights, sizeof(float) * num_weights, cudaMemcpyHostToDevice);
 
 	float* h_data = (float*) malloc(sizeof(float) * training_size * input_size);
 	for (int i = 0; i < training_size * input_size; i++) {
@@ -257,7 +263,7 @@ int main() {
 
 	float* h_expected = (float*) malloc(sizeof(float) * training_size * output_size);
 	for (int i = 0; i < training_size; i++) {
-		h_expected[i] = h_data[2 * i] * h_data[(2 * i) + 1];
+		h_expected[i] = h_data[input_size * i] + h_data[(input_size * i) + 1] - h_data[(input_size * i) + 2];
 	}
 
 
@@ -270,11 +276,13 @@ int main() {
 	cudaMemcpy(d_expected, h_expected, sizeof(float) * training_size * output_size, cudaMemcpyHostToDevice);
 
 	initNeurons<<<1, total_size>>>(d_neurons, total_size);
-	fillRandomFloatBetween01<<<1, num_weights>>>(d_weights, num_weights, seed);
+	//fillRandomFloatBetween01<<<1, num_weights>>>(d_weights, num_weights, seed);
 
-	trainNetwork<<<1, hidden_size>>>(d_neurons, d_weights, d_layer_sizes, num_layers, d_data, d_expected, training_size, 2.0f);
+	for (int i = 0; i < 50; i++) {
+		trainNetwork<<<1, hidden_size>>>(d_neurons, d_weights, d_layer_sizes, num_layers, d_data, d_expected, training_size, 2.0f);
+	}
 
-	int test_size = 100;
+	int test_size = 30;
 	float* h_test_data = (float*) malloc(sizeof(float) * test_size * input_size);
 	for (int i = 0; i < test_size * input_size; i++) {
 		h_test_data[i] = randomFloat();
@@ -293,12 +301,13 @@ int main() {
 	cudaMemcpy(h_results, d_results, sizeof(float) * test_size * output_size, cudaMemcpyDeviceToHost);
 
 	for (int i = 0; i < test_size; i++) {
-		float first = h_test_data[2 * i];
-		float second = h_test_data[(2 * i) + 1];
-		float actual = first * second;
+		float first = h_test_data[input_size * i];
+		float second = h_test_data[(input_size * i) + 1];
+		float third = h_test_data[(input_size * i) + 2];
+		float actual = first + second - third;
 		float result = h_results[i];
 		float error = result - actual; 
-		printf("%f * %f = %f : %f ERROR: %f \n", first, second, actual, result, error);
+		printf("%f + %f - %f = %f : %f ERROR: %f \n", first, second, third, actual, result, error);
 	}
 
 	free(h_layer_sizes);
